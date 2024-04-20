@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+asyncpg
+sqlalchemy
+httpx
+aiocache
+PyJWT
+Werkzeug
+python-dotenv

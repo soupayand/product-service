@@ -1,4 +1,6 @@
 from sqlalchemy.exc import NoResultFound, IntegrityError
+from sqlalchemy.orm import selectinload
+from sqlalchemy import select
 from ..utils.context import user_info_context
 from ..models.item import Item
 from typing import List
@@ -12,16 +14,16 @@ class ItemService:
 
     async def add_item(self, item_data: dict) -> dict:
         role = user_info_context.get("role")
-        if role != "merchant":
+        if "merchant" in role:
             raise AttributeError("User is not a merchant. Cannot add new item.")
 
-        owner_id = user_info_context.get("id")
+        owner_id = user_info_context.get()["id"]
         if not owner_id:
             raise ValueError("User ID is missing from the user info context.")
 
-        new_item = Item(**item_data, owner_id=owner_id)
+        new_item: Item = Item(**item_data, owner_id=owner_id)
         attempts = 2
-        async with self.async_session() as session:
+        async with self.async_session as session:
             for attempt in range(1, attempts + 1):
                 try:
                     session.add(new_item)
@@ -39,27 +41,30 @@ class ItemService:
                     logger.error("Error adding new item", extra={"item": new_item.to_dict()})
                     raise e
 
-    async def get_items(self, item_ids: List[int] = None) -> dict:
-        async with self.async_session() as session:
+    async def get_items(self, item_ids: [List[int]] = None) -> dict:
+        async with self.async_session as session:
             try:
                 if item_ids is None:
-                    owner_id = user_info_context.get("id")
-                    items = await session.execute(select(Item).where(Item.owner_id == owner_id))
+                    owner_id = user_info_context.get()["id"]
+                    query = select(Item).filter(Item.owner_id == owner_id)
                 else:
-                    items = await session.execute(select(Item).where(Item.id.in_(item_ids)))
-                
-                items = items.scalars().all()
+                    query = select(Item).filter(Item.id.in_(item_ids))
+
+                results = await session.execute(query)
+                items : List[Item] = results.scalars().all()
+
                 return {"items": [item.to_dict() for item in items]}
+
             except Exception as e:
-                logger.error("Error fetching items using item_ids", extra={"item_ids": item_ids})
+                logger.error("Error fetching items", extra={"item_ids": item_ids}, exc_info=True)
                 raise e
 
     async def update_item(self, item_data: dict) -> dict:
         attempts = 2
-        user_id = user_info_context.get("id")
-        async with self.async_session() as session:
+        user_id = user_info_context.get()["id"]
+        async with self.async_session as session:
             try:
-                item = await session.get(Item, item_id)
+                item = await session.get(Item, item_data["id"])
                 if not item or item.owner_id != user_id:
                     raise ValueError("Unauthorized or item not found")
 
@@ -68,8 +73,10 @@ class ItemService:
                         for key, value in item_data.items():
                             if key in item.__table__.columns.keys() and key not in ['id', 'owner_id']:
                                 setattr(item, key, value)
+
                         await session.commit()
                         return item.to_dict()
+
                     except IntegrityError as e:
                         await session.rollback()
                         if attempt == attempts:

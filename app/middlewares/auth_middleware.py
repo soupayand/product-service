@@ -3,17 +3,12 @@ from starlette.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from httpx import AsyncClient
 from ..utils.cache import async_cache
+from ..utils.context import user_info_context
 import jwt
 import os
 import logging
 
 logger = logging.getLogger(__name__)
-
-JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY')
-HASHING_ALGORITHM = os.getenv('HASHING_ALGORITHM')
-USER_SERVICE_URL = "http://127.0.0.1:3000/user"
-
-
 
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -22,27 +17,30 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return JSONResponse(content={"detail": "Authorization token missing or malformed"}, status_code=401)
 
         token: str = authorization.split(" ")[1]
+        user_info_token = None
         try:
-            payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[HASHING_ALGORITHM])
+            secret_key = os.getenv("JWT_SECRET_KEY")
+            hashing_algo = [os.getenv("HASHING_ALGORITHM")]
+
+            payload = jwt.decode(token,secret_key, algorithms=hashing_algo)
             user_id = payload.get("user_id")
             if user_id is None:
                 raise HTTPException(status_code=400, detail="user_id not found in token")
             
             user_info = await get_user_info(user_id)
-            request.state.user = user_info
+            user_info_token = user_info_context.set(user_info)
 
             response = await call_next(request)
             
         except jwt.PyJWTError as e:
             logger.error("Invalid Token", exc_info=True)
-            return JSONResponse(content={"detail": "Invalid Token"}, status_code=401)
-        except HTTPException as e:
-            logger.error(e.detail, exc_info=True)
-            return JSONResponse(content={"detail": e.detail}, status_code=e.status_code)
+            return JSONResponse(content={"status": "failure", "message": str(e)}, status_code=401)
         except Exception as e:
             logger.error(str(e), exc_info=True)
-            return JSONResponse(content={"detail": "Server error"}, status_code=500)
-
+            return JSONResponse(content={"status":"failure","message":"Server error"}, status_code=500)
+        finally:
+            if user_info_token:
+                user_info_context.reset(user_info_token)
         return response
 
 async def get_user_info(user_id: str):
@@ -50,7 +48,8 @@ async def get_user_info(user_id: str):
     if not user_info:
         try:
             async with AsyncClient() as client:
-                response = await client.get(f"{USER_SERVICE_URL}/{user_id}")
+                user_service_url = os.getenv("USER_SERVICE_URL")
+                response = await client.get(f"{user_service_url}/{user_id}")
                 response.raise_for_status()
                 user_info = response.json()["data"]
                 await async_cache.set(user_id, user_info, ttl=900)
